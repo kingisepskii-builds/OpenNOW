@@ -35,7 +35,13 @@ pub use queue::PushOutcome;
 /// Burst allowance for adaptive video delivery. The decoded presenter uses
 /// the same bound and trims stale frames before presentation, keeping latency
 /// low without treating ordinary game-FPS fluctuations as decoder loss.
-pub const ADAPTIVE_VIDEO_QUEUE_CAPACITY: usize = 7;
+///
+/// Sized for a NACK/FEC recovery burst rather than frame-rate jitter alone: a
+/// repaired block can release roughly 250 ms of encoded frames at once, which
+/// is 15 frames at 60 fps. At 7 that burst overflowed the staging queue and
+/// discarded the reference chain, turning a recoverable gap into an IDR
+/// request.
+pub const ADAPTIVE_VIDEO_QUEUE_CAPACITY: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

@@ -23,8 +23,8 @@ use crate::video_queue::VideoQueue;
 use crate::linux_backend::{LinuxVideoPath, LinuxVideoSelection};
 
 const VIDEO_QUEUE_CAPACITY: usize = 2;
-#[cfg(target_os = "macos")]
-const MAC_VIDEO_QUEUE_MAX_CAPACITY: usize = 60;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+const VIDEO_QUEUE_MAX_CAPACITY: usize = 60;
 // Ten 20 ms Opus packets cover the official client's 200 ms adaptive ceiling.
 // The queue remains bounded and drop-oldest, so recovery cannot grow latency
 // without limit under a stalled decoder.
@@ -112,16 +112,16 @@ impl RecordingTap {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn macos_video_queue_capacity(fps: u32) -> usize {
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn video_queue_capacity_for_fps(fps: u32) -> usize {
     // FEC/NACK intentionally holds an incomplete block for up to 150 ms. Once repaired, several
     // encoded frames can be released together, so keep 250 ms of compressed video to absorb that
-    // bounded recovery burst plus AppKit scheduling jitter. Decoded IOSurfaces remain in the small
-    // VideoToolbox/Metal queues and never pass through this buffer.
+    // bounded recovery burst plus host scheduling jitter. Decoded surfaces remain in the small
+    // platform presentation queues and never pass through this buffer.
     let frames_for_recovery_burst = fps.max(1).div_ceil(4);
     usize::try_from(frames_for_recovery_burst)
-        .unwrap_or(MAC_VIDEO_QUEUE_MAX_CAPACITY)
-        .clamp(VIDEO_QUEUE_CAPACITY, MAC_VIDEO_QUEUE_MAX_CAPACITY)
+        .unwrap_or(VIDEO_QUEUE_MAX_CAPACITY)
+        .clamp(VIDEO_QUEUE_CAPACITY, VIDEO_QUEUE_MAX_CAPACITY)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -816,6 +816,13 @@ impl MediaSink {
         let Ok(result) = self.shared.video.push(frame) else {
             return PushOutcome::Closed;
         };
+        if let Some(invalidation) = result.invalidated {
+            opennow_streamer_protocol::log::log_async(
+                "WARN",
+                "video-reference",
+                &format!("invalidation trigger; {invalidation}"),
+            );
+        }
         if result.request_keyframe {
             opennow_streamer_protocol::log::log_async(
                 "WARN",
@@ -1019,7 +1026,7 @@ impl MediaSession {
         let shared = Arc::new(SharedPipeline {
             // Keep a bounded scheduler-burst reserve. The VideoToolbox worker drains this queue
             // asynchronously; decoded frames remain latest-first at the Metal presentation edge.
-            video: Arc::new(VideoQueue::new(macos_video_queue_capacity(stream.fps))),
+            video: Arc::new(VideoQueue::new(video_queue_capacity_for_fps(stream.fps))),
             audio: Arc::new(BoundedQueue::new(AUDIO_QUEUE_CAPACITY)),
             output,
             feedback,
@@ -1384,7 +1391,7 @@ impl MediaSession {
             );
         }
         let shared = Arc::new(SharedPipeline {
-            video: Arc::new(VideoQueue::new(macos_video_queue_capacity(stream.fps))),
+            video: Arc::new(VideoQueue::new(video_queue_capacity_for_fps(stream.fps))),
             audio: Arc::new(BoundedQueue::new(AUDIO_QUEUE_CAPACITY)),
             output,
             feedback,
@@ -1579,7 +1586,10 @@ impl MediaSession {
     ) -> Result<Self, String> {
         let bridge = Arc::new(WindowsBridge::new());
         let shared = Arc::new(SharedPipeline {
-            video: Arc::new(VideoQueue::new(VIDEO_QUEUE_CAPACITY)),
+            // NACK/FEC holds an incomplete block for up to one recovery window and then releases
+            // several encoded frames at once. A two-frame queue turned that bounded burst into a
+            // queue-full invalidation and an IDR request, so size it for 250 ms like macOS.
+            video: Arc::new(VideoQueue::new(video_queue_capacity_for_fps(stream.fps))),
             audio: Arc::new(BoundedQueue::new(AUDIO_QUEUE_CAPACITY)),
             output,
             feedback,
@@ -4840,13 +4850,12 @@ mod tests {
     use openh264::formats::{RgbSliceU8, YUVBuffer};
     use opus::{Application, Encoder as OpusEncoder};
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_encoded_queue_keeps_bounded_scheduler_burst_tolerance() {
-        assert_eq!(macos_video_queue_capacity(30), 8);
-        assert_eq!(macos_video_queue_capacity(60), 15);
-        assert_eq!(macos_video_queue_capacity(120), 30);
-        assert_eq!(macos_video_queue_capacity(240), 60);
+    fn encoded_queue_keeps_bounded_scheduler_burst_tolerance() {
+        assert_eq!(video_queue_capacity_for_fps(30), 8);
+        assert_eq!(video_queue_capacity_for_fps(60), 15);
+        assert_eq!(video_queue_capacity_for_fps(120), 30);
+        assert_eq!(video_queue_capacity_for_fps(240), 60);
     }
 
     #[test]

@@ -15,6 +15,29 @@ pub(crate) struct VideoPacket {
 pub(crate) struct VideoPush {
     pub dropped: usize,
     pub request_keyframe: bool,
+    /// Which admission rule discarded the prediction chain, when one did.
+    /// Diagnostics only: the queue behaves identically either way.
+    pub invalidated: Option<VideoInvalidation>,
+}
+
+/// The two independent reasons `push` drops the retained chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoInvalidation {
+    /// The arriving frame declared a broken reference chain.
+    NonContiguous,
+    /// The queue was already full, so no retained delta can survive.
+    QueueFull { len: usize, capacity: usize },
+}
+
+impl std::fmt::Display for VideoInvalidation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonContiguous => write!(formatter, "reason=non-contiguous"),
+            Self::QueueFull { len, capacity } => {
+                write!(formatter, "reason=queue-full len={len} cap={capacity}")
+            }
+        }
+    }
 }
 
 struct State {
@@ -62,9 +85,20 @@ impl VideoQueue {
             return Err(());
         }
         let mut dropped = 0;
-        if !state.waiting_for_keyframe && (!frame.contiguous || state.frames.len() == self.capacity)
-        {
-            dropped += Self::invalidate_locked(&mut state);
+        let mut invalidated = None;
+        if !state.waiting_for_keyframe {
+            // Capture the depth before invalidate_locked clears it.
+            if !frame.contiguous {
+                invalidated = Some(VideoInvalidation::NonContiguous);
+            } else if state.frames.len() == self.capacity {
+                invalidated = Some(VideoInvalidation::QueueFull {
+                    len: state.frames.len(),
+                    capacity: self.capacity,
+                });
+            }
+            if invalidated.is_some() {
+                dropped += Self::invalidate_locked(&mut state);
+            }
         }
         if state.waiting_for_keyframe && !frame.keyframe {
             let request_keyframe = !state.request_pending;
@@ -72,6 +106,7 @@ impl VideoQueue {
             return Ok(VideoPush {
                 dropped: dropped + 1,
                 request_keyframe,
+                invalidated,
             });
         }
         let reset_decoder = state.waiting_for_keyframe;
@@ -89,6 +124,7 @@ impl VideoQueue {
         Ok(VideoPush {
             dropped,
             request_keyframe: false,
+            invalidated,
         })
     }
 
@@ -219,6 +255,30 @@ mod tests {
         assert_eq!(result.dropped, 2);
         assert!(!result.request_keyframe);
         assert_eq!(queue.pop_packet().unwrap().frame.frame_index, Some(3));
+    }
+
+    #[test]
+    fn invalidation_reports_which_trigger_fired() {
+        let queue = VideoQueue::new(2);
+        queue.push(frame(1, true)).unwrap();
+        assert_eq!(queue.push(frame(2, false)).unwrap().invalidated, None);
+
+        // Full queue: no retained delta can survive, whatever the frame declares.
+        assert_eq!(
+            queue.push(frame(3, true)).unwrap().invalidated,
+            Some(VideoInvalidation::QueueFull {
+                len: 2,
+                capacity: 2,
+            })
+        );
+
+        // A declared reference break invalidates while there is still room.
+        let mut broken = frame(4, true);
+        broken.contiguous = false;
+        assert_eq!(
+            queue.push(broken).unwrap().invalidated,
+            Some(VideoInvalidation::NonContiguous)
+        );
     }
 
     #[test]
