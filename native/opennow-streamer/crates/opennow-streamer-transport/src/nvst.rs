@@ -81,7 +81,7 @@ const SRTCP_RR_INTERVAL: Duration = Duration::from_secs(1);
 const RTCP_RECOVERY_INTERVAL: Duration = Duration::from_millis(4);
 const NACK_RETRY_INTERVAL: Duration = Duration::from_millis(4);
 const DEFAULT_NACK_RTT: Duration = Duration::from_millis(30);
-const NACK_TRACKING_TIMEOUT: Duration = Duration::from_millis(52);
+const NACK_TRACKING_TIMEOUT: Duration = Duration::from_millis(120);
 const MAX_NACK_ATTEMPTS: u8 = 3;
 const KEYFRAME_REQUEST_COOLDOWN: Duration = Duration::from_millis(250);
 const MAX_PENDING_NACK_RANGES: usize = 16;
@@ -205,7 +205,7 @@ const MAX_REORDER_WINDOW: usize = 2_048;
 // Cloud packet reordering plus RTCP-over-SCTP NACK round trips can exceed one or two frame times.
 // Keep the wait exceptional and bounded, but long enough for a retransmission to beat an IDR
 // reset. This adds latency only while a sequence gap is open; the normal path still drains at once.
-const MJOLNIR_REORDER_DEQUEUE_TIMEOUT: Duration = Duration::from_millis(52);
+const MJOLNIR_REORDER_DEQUEUE_TIMEOUT: Duration = Duration::from_millis(120);
 // The replay filter must be at least as deep as the reorder/NACK window. The old 64-packet bitmap
 // rejected valid retransmissions after roughly 10 ms on a high-bitrate stream, guaranteeing that
 // every NACK eventually degraded into a keyframe reset.
